@@ -1,0 +1,1 @@
+pip install requests psutil pyperclip opencv-python numpy sounddevice pynput pyautogui
