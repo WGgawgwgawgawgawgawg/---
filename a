@@ -1,1 +1,1 @@
-pip install requests psutil pyperclip opencv-python numpy sounddevice pynput pyautogui pywin32
+pip install pycryptodome pypiwin32 pyperclip opencv-python sounddevice pynput pyautogui psutil
